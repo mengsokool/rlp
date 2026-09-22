@@ -1,0 +1,191 @@
+---
+title: "Getting Started"
+description: "How to install, configure, and operate a Raina Link Protocol (RLP) server and client."
+keywords: ["RLP", "quickstart", "installation", "node", "typescript", "server", "client"]
+---
+
+# Getting Started with RLP
+
+This guide demonstrates how to install the `@raina-iot/rlp` library, start an RLP application server, connect an IoT device client, and exchange bidirectional telemetry and command frames.
+
+---
+
+## Prerequisites
+
+- **Node.js**: Version 20.x or newer (the protocol runtime requires modern Buffer and BigInt support).
+- **Package Manager**: `pnpm`, `npm`, or `yarn`.
+
+---
+
+## 1. Installation
+
+Install `@raina-iot/rlp` into your application:
+
+```bash
+# Using pnpm
+pnpm add @raina-iot/rlp
+
+# Using npm
+npm install @raina-iot/rlp
+```
+
+---
+
+## 2. Creating an RLP Server
+
+Create a new file `server.ts` and initialize the RLP server. The server listens on plain TCP or TLS, authenticates incoming `HELLO` frames, and dispatches events.
+
+```ts
+import { createRlpServer, ValueType } from '@raina-iot/rlp';
+
+// 1. Initialize the server with custom authentication logic
+const server = createRlpServer({
+  port: 9000,
+  host: '0.0.0.0',
+  handshakeTimeoutMs: 10_000,
+  authenticate: async (hello) => {
+    console.log(`[Handshake] Device "${hello.deviceId}" connecting...`);
+
+    // Verify authentication credentials (e.g., token, shared secret, or HMAC)
+    const isValid = hello.credential.toString('utf8') === 'secret-device-token';
+
+    return {
+      accept: isValid,
+      // Optional capabilities returned in WELCOME frame
+      capabilities: Buffer.from([0x01, 0x00]),
+      // Optional context attached to the connection instance
+      context: { authenticatedAt: Date.now() },
+    };
+  },
+});
+
+// 2. Listen for telemetry samples from active devices
+server.on('data', ({ deviceId, sample }) => {
+  console.log(`[Telemetry] Device: ${deviceId} | Channel: ${sample.channel} | Type: ${sample.valueType} | Value:`, sample.value);
+
+  // If a timestamp was supplied:
+  if (sample.timestamp !== undefined) {
+    console.log(`  └ Sensor timestamp: ${new Date(Number(sample.timestamp)).toISOString()}`);
+  }
+});
+
+// 3. Listen for batch telemetry
+server.on('batch', ({ deviceId, samples }) => {
+  console.log(`[Batch] Received ${samples.length} records from "${deviceId}"`);
+});
+
+// 4. Listen for command execution acknowledgements
+server.on('ack', ({ deviceId, ack }) => {
+  console.log(`[ACK] Device: ${deviceId} | Command ID: ${ack.id} | Status: ${ack.status}`);
+});
+
+// 5. Lifecycle events
+server.on('device:connect', (connection) => {
+  console.log(`[Online] Device connected: ${connection.deviceId}`);
+
+  // Example: Send a command to the device to turn on a relay on channel 2
+  setTimeout(() => {
+    const sent = server.command(connection.deviceId!, {
+      channel: 2,
+      valueType: ValueType.BOOL,
+      value: true,
+    });
+    console.log(`[Command] Dispatched command to channel 2: ${sent}`);
+  }, 1000);
+});
+
+server.on('device:disconnect', (connection) => {
+  console.log(`[Offline] Device disconnected: ${connection.deviceId}`);
+});
+
+// 6. Start listening
+const addr = await server.listen();
+console.log(`RLP Server listening on port ${addr.port}`);
+```
+
+---
+
+## 3. Creating a Client Connection
+
+Create a lightweight client script in `client.ts` to simulate a connected device:
+
+```ts
+import { connect } from 'node:net';
+import {
+  decodePacket,
+  encodeData,
+  encodeHello,
+  encodePacket,
+  FrameDecoder,
+  PacketType,
+  PROTOCOL_VERSION,
+  ValueType,
+  AckStatus,
+} from '@raina-iot/rlp';
+
+const socket = connect(9000, '127.0.0.1', () => {
+  console.log('Connected to RLP server over TCP.');
+
+  // 1. Send mandatory HELLO handshake frame
+  const helloFrame = encodeHello({
+    version: PROTOCOL_VERSION,
+    deviceId: 'sensor-device-01',
+    credential: Buffer.from('secret-device-token', 'utf8'),
+    capabilities: Buffer.alloc(0),
+  });
+  socket.write(helloFrame);
+});
+
+// 2. Decode incoming frames from the server
+const decoder = new FrameDecoder();
+
+socket.on('data', (chunk) => {
+  for (const frame of decoder.push(chunk)) {
+    const packet = decodePacket(frame);
+
+    switch (packet.type) {
+      case PacketType.WELCOME:
+        console.log('[Server] Handshake accepted! Protocol version:', packet.welcome.version);
+
+        // Start transmitting periodic sensor telemetry on channel 1 (Temperature)
+        setInterval(() => {
+          const telemetryFrame = encodeData({
+            channel: 1,
+            valueType: ValueType.FLOAT32,
+            value: 26.4,
+          });
+          socket.write(telemetryFrame);
+          console.log('[Client] Sent telemetry: 26.4 C on channel 1');
+        }, 5000);
+        break;
+
+      case PacketType.COMMAND:
+        console.log(`[Server] Received COMMAND #${packet.command.id} on channel ${packet.command.channel}:`, packet.command.value);
+
+        // Acknowledge the command execution
+        const ackFrame = encodePacket({
+          type: PacketType.ACK,
+          ack: {
+            id: packet.command.id,
+            status: AckStatus.OK,
+          },
+        });
+        socket.write(ackFrame);
+        console.log(`[Client] Sent ACK for command #${packet.command.id}`);
+        break;
+
+      case PacketType.ERROR:
+        console.error('[Error] Server reported error:', packet.error.code, packet.error.message);
+        break;
+    }
+  }
+});
+```
+
+---
+
+## Next Steps
+
+- Review the [Framing & Stream Handling](/docs/spec/framing) specification to learn how RLP headers are framed.
+- Explore the [Value Types & Encodings](/docs/spec/data-types) guide to learn all supported binary formats.
+- Inspect the [Wire Frames & Hex Dumps](/docs/examples/wire-frames) reference for byte-for-byte examples.

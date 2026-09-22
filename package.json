@@ -1,0 +1,20 @@
+{
+  "name": "raina-rlp-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @raina-iot/rlp",
+    "build:all": "pnpm -r run build",
+    "test": "npm run test -w @raina-iot/rlp",
+    "bench": "npm run bench -w @raina-iot/rlp",
+    "bench:connections": "npm run bench:connections -w @raina-iot/rlp --",
+    "bench:throughput": "npm run bench:throughput -w @raina-iot/rlp --",
+    "bench:fleet": "npm run bench:fleet -w @raina-iot/rlp --",
+    "dev": "pnpm --filter @raina-iot/docs run dev",
+    "docs:dev": "pnpm --filter @raina-iot/docs run dev",
+    "docs:build": "pnpm --filter @raina-iot/docs run build"
+  },
+  "devDependencies": { "@types/node": "^24.0.0", "typescript": "^5.9.0" }
+}

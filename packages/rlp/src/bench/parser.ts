@@ -1,0 +1,2 @@
+import { performance } from 'node:perf_hooks'; import { FrameDecoder, ValueType, encodeData } from '../index.js';
+const frame=encodeData({channel:1,valueType:ValueType.FLOAT32,value:22.25});const count=1_000_000, input=Buffer.concat(Array.from({length:count},()=>frame));const d=new FrameDecoder();const start=performance.now();const out=d.push(input);const ms=performance.now()-start;console.log(JSON.stringify({frames:out.length,framesPerSecond:Math.round(count/(ms/1000)),mbPerSecond:+((input.length/1048576)/(ms/1000)).toFixed(2),elapsedMs:+ms.toFixed(2)}));

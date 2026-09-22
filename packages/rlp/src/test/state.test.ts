@@ -1,0 +1,3 @@
+import test from 'node:test'; import assert from 'node:assert/strict';
+import { ConnectionState, ErrorCode, PacketType, SessionStateMachine, ValueType } from '../index.js';
+test('state machine rejects data before hello and duplicate hello',()=>{const m=new SessionStateMachine();assert.throws(()=>m.accept({type:PacketType.DATA,sample:{channel:1,valueType:ValueType.BOOL,value:true}}),/HELLO required/);m.accept({type:PacketType.HELLO,hello:{version:1,deviceId:'x',credential:Buffer.alloc(0),capabilities:Buffer.alloc(0)}});m.authenticated();m.activate();assert.equal(m.state,ConnectionState.ACTIVE);assert.throws(()=>m.accept({type:PacketType.HELLO,hello:{version:1,deviceId:'x',credential:Buffer.alloc(0),capabilities:Buffer.alloc(0)}}),/duplicate/);});

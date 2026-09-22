@@ -1,0 +1,105 @@
+---
+title: "Value Types & Encodings"
+description: "Specification of the 13 RLP value types, primitive encodings, sample payloads, and strict validation rules."
+keywords: ["RLP", "value types", "primitives", "sample", "payload", "big-endian", "validation"]
+---
+
+# Value Types & Encodings
+
+This document defines the 13 supported value types in RLP Version 1, their binary encodings, sample payload layouts, and validation rules.
+
+---
+
+## 1. ValueType Enumeration
+
+Every sensor measurement and actuator command identifies its payload format using an 8-bit `ValueType` identifier (`1` to `13`):
+
+| Code | Type Name | Wire Encoding | Payload Width | Constraints and Validation Rules |
+|---|---|---|---|---|
+| `1` | `BOOL` | `u8` | 1 byte | MUST be strictly `0x00` (false) or `0x01` (true). Any value $> 1$ MUST trigger `INVALID_PACKET`. |
+| `2` | `INT8` | `i8` | 1 byte | Signed 8-bit two's-complement integer (`-128` to `127`). |
+| `3` | `UINT8` | `u8` | 1 byte | Unsigned 8-bit integer (`0` to `255`). |
+| `4` | `INT16` | `i16be` | 2 bytes | Signed 16-bit big-endian integer (`-32,768` to `32,767`). |
+| `5` | `UINT16` | `u16be` | 2 bytes | Unsigned 16-bit big-endian integer (`0` to `65,535`). |
+| `6` | `INT32` | `i32be` | 4 bytes | Signed 32-bit big-endian integer (`-2,147,483,648` to `2,147,483,647`). |
+| `7` | `UINT32` | `u32be` | 4 bytes | Unsigned 32-bit big-endian integer (`0` to `4,294,967,295`). |
+| `8` | `INT64` | `i64be` | 8 bytes | Signed 64-bit big-endian integer. |
+| `9` | `UINT64` | `u64be` | 8 bytes | Unsigned 64-bit big-endian integer. |
+| `10` | `FLOAT32`| `float32` | 4 bytes | IEEE 754 single-precision floating point (big-endian). |
+| `11` | `FLOAT64`| `float64` | 8 bytes | IEEE 754 double-precision floating point (big-endian). |
+| `12` | `STRING` | `lp16` | $2 + L$ bytes | Length-prefixed strict UTF-8 string. Senders MUST NOT exceed 65,535 bytes. Receivers MUST validate UTF-8 encoding. |
+| `13` | `BYTES`  | `lp16` | $2 + L$ bytes | Length-prefixed opaque byte array. Senders MUST NOT exceed 65,535 bytes. |
+
+Receivers **MUST** reject any value type code $< 1$ or $> 13$ with error code `UNSUPPORTED_TYPE` (7).
+
+---
+
+## 2. Length-Prefixed Primitives (`lp8` and `lp16`)
+
+Variable-length data elements in RLP use explicit byte-length prefixes:
+
+### `lp8` (Length-Prefixed 8-bit)
+Used for short strings such as `deviceId` in `HELLO` and `message` in `ERROR`:
+- Prefix: 1 byte (`u8`), range `0` to `255`.
+- Data: Exactly $L$ bytes of UTF-8 encoded text.
+
+### `lp16` (Length-Prefixed 16-bit)
+Used for `credential`, `capabilities`, `STRING`, and `BYTES`:
+- Prefix: 2 bytes unsigned big-endian (`u16be`), range `0` to `65,535`.
+- Data: Exactly $L$ bytes of payload.
+
+---
+
+## 3. Strict Validation Rules
+
+To prevent ambiguous states and security vulnerabilities, RLP decoders enforce strict validation on all values:
+
+### Boolean Strictness
+A boolean value is represented by a single byte.
+- `0x00`: Evaluates to `false`.
+- `0x01`: Evaluates to `true`.
+- Any value $\ge 0x02$ **MUST** be rejected immediately with `INVALID_PACKET` ("invalid bool"). Implementations must not treat arbitrary non-zero numbers as true.
+
+### String Integrity & UTF-8 Validation
+For `STRING` values (`ValueType` 12), the payload bytes **MUST** form a valid UTF-8 sequence.
+- Overlong encodings, invalid continuation bytes, and surrogate pairs are strictly forbidden.
+- The reference decoder verifies that re-encoding the parsed string reproduces the identical byte array. Any mismatch **MUST** trigger `INVALID_PACKET` ("invalid UTF-8").
+
+---
+
+## 4. Telemetry Sample Structure
+
+A telemetry sample represents an observation on a numeric channel. Samples appear inside `DATA` frames and `BATCH` frames.
+
+### Sample Layout Without Timestamp (`flags = 0x00`)
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Channel (u16be)       |Value Type(u8) | Value Payload |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                         ... Value Payload                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+### Sample Layout With Timestamp (`flags = 0x01`)
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Channel (u16be)       |Value Type(u8) |               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+               |
+|                    Timestamp (i64be, ms)                      |
+|                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                               | Value Payload ...             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+### Field Definitions
+
+1. **`Channel` (`u16be`):** Unsigned 16-bit integer identifying the sensor channel (`0` to `65,535`).
+2. **`Value Type` (`u8`):** The `ValueType` code (`1` to `13`).
+3. **`Timestamp` (`i64be`, optional):** Signed 64-bit integer Unix timestamp in milliseconds. Present if and only if bit 0 of the applicable flags byte is set to `1`.
+4. **`Value Payload` (variable):** Raw binary representation conforming to the specified `Value Type`.

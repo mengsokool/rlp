@@ -1,0 +1,219 @@
+---
+title: "Wire Frames & Hex Dumps"
+description: "Concrete byte-for-byte hexadecimal examples for all 10 RLP packet types, offsets, and field breakdowns."
+keywords: ["RLP", "wire format", "hex dump", "examples", "packets", "binary", "byte breakdown"]
+---
+
+# Wire Frames & Hex Dumps
+
+This document provides canonical, byte-for-byte hexadecimal frames verified against the reference RLP v1 encoder and decoder.
+
+---
+
+## 1. HELLO Frame (Type 1)
+
+Client initiates session with protocol version `1`, device ID `"d1"`, credential `"k"`, and empty capabilities:
+
+```text
+01 00 00 09 01 02 64 31 00 01 6b 00 00
+```
+
+### Breakdown (13 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `01` | Frame Type | `HELLO` (1) |
+| `01` | `00` | Flags | `0` |
+| `02–03` | `00 09` | Payload Length | 9 bytes |
+| `04` | `01` | Version | `1` |
+| `05–07` | `02 64 31` | Device ID (`lp8`) | Length 2, `"d1"` |
+| `08–10` | `00 01 6b` | Credential (`lp16`) | Length 1, `"k"` |
+| `11–12` | `00 00` | Capabilities (`lp16`)| Length 0 |
+
+---
+
+## 2. WELCOME Frame (Type 2)
+
+Server confirms authentication with version `1` and empty capabilities:
+
+```text
+02 00 00 03 01 00 00
+```
+
+### Breakdown (7 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `02` | Frame Type | `WELCOME` (2) |
+| `01` | `00` | Flags | `0` |
+| `02–03` | `00 03` | Payload Length | 3 bytes |
+| `04` | `01` | Version | `1` |
+| `05–06` | `00 00` | Capabilities (`lp16`)| Length 0 |
+
+---
+
+## 3. DATA Frame (Without Timestamp)
+
+Client reports boolean value `true` on channel `4`:
+
+```text
+03 00 00 04 00 04 01 01
+```
+
+### Breakdown (8 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `03` | Frame Type | `DATA` (3) |
+| `01` | `00` | Flags | `0` (No timestamp) |
+| `02–03` | `00 04` | Payload Length | 4 bytes |
+| `04–05` | `00 04` | Channel (`u16be`) | Channel `4` |
+| `06` | `01` | Value Type | `BOOL` (1) |
+| `07` | `01` | Value | `true` |
+
+---
+
+## 4. DATA Frame (With Timestamp)
+
+Client reports single-precision float `21.5` on channel `4` with Unix millisecond timestamp `123`:
+
+```text
+03 01 00 0f 00 04 0a 00 00 00 00 00 00 00 7b 41 ac 00 00
+```
+
+### Breakdown (19 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `03` | Frame Type | `DATA` (3) |
+| `01` | `01` | Flags | `HAS_TIMESTAMP` (bit 0 = 1) |
+| `02–03` | `00 0f` | Payload Length | 15 bytes |
+| `04–05` | `00 04` | Channel (`u16be`) | Channel `4` |
+| `06` | `0a` | Value Type | `FLOAT32` (10) |
+| `07–14` | `00 00 00 00 00 00 00 7b` | Timestamp (`i64be`)| `123` ms |
+| `15–18` | `41 ac 00 00` | Value (`float32be`) | `21.5` |
+
+---
+
+## 5. BATCH Frame (Type 4)
+
+Client transmits two boolean records (Record 1: Channel 0, false; Record 2: Channel 2, true):
+
+```text
+04 00 00 0c 00 02 00 00 00 01 00 00 00 02 01 01
+```
+
+### Breakdown (16 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `04` | Frame Type | `BATCH` (4) |
+| `01` | `00` | Flags | `0` |
+| `02–03` | `00 0c` | Payload Length | 12 bytes |
+| `04–05` | `00 02` | Count (`u16be`) | 2 records |
+| `06` | `00` | Rec 1: Sample Flags | `0` |
+| `07–08` | `00 00` | Rec 1: Channel | Channel `0` |
+| `09` | `01` | Rec 1: Value Type | `BOOL` (1) |
+| `10` | `00` | Rec 1: Value | `false` |
+| `11` | `00` | Rec 2: Sample Flags | `0` |
+| `12–13` | `00 02` | Rec 2: Channel | Channel `2` |
+| `14` | `01` | Rec 2: Value Type | `BOOL` (1) |
+| `15` | `01` | Rec 2: Value | `true` |
+
+---
+
+## 6. COMMAND Frame (Type 5)
+
+Server sends actuation command on channel `4` with command ID `42` (`0x0000002A`) and boolean value `true`:
+
+```text
+05 00 00 08 00 00 00 2a 00 04 01 01
+```
+
+### Breakdown (12 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `05` | Frame Type | `COMMAND` (5) |
+| `01` | `00` | Flags | `0` |
+| `02–03` | `00 08` | Payload Length | 8 bytes |
+| `04–07` | `00 00 00 2a` | Command ID (`u32be`)| `42` |
+| `08–09` | `00 04` | Channel (`u16be`) | Channel `4` |
+| `10` | `01` | Value Type | `BOOL` (1) |
+| `11` | `01` | Value | `true` |
+
+---
+
+## 7. ACK Frame (Type 6)
+
+Client acknowledges command ID `42` with status `OK` (0):
+
+```text
+06 00 00 05 00 00 00 2a 00
+```
+
+### Breakdown (9 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `06` | Frame Type | `ACK` (6) |
+| `01` | `00` | Flags | `0` |
+| `02–03` | `00 05` | Payload Length | 5 bytes |
+| `04–07` | `00 00 00 2a` | Command ID (`u32be`)| `42` |
+| `08` | `00` | Status (`u8`) | `OK` (0) |
+
+---
+
+## 8. PING and PONG Frames (Types 7 and 8)
+
+Keep-alive ping with nonce `0x12345678`:
+
+```text
+07 00 00 04 12 34 56 78
+```
+
+Peer replies with identical nonce in `PONG` (Type 8):
+
+```text
+08 00 00 04 12 34 56 78
+```
+
+---
+
+## 9. ERROR Frame (Type 9)
+
+Server terminates connection due to `AUTH_FAILED` (code 2) with diagnostic string `"failed"`:
+
+```text
+09 00 00 09 00 02 06 66 61 69 6c 65 64
+```
+
+### Breakdown (13 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `09` | Frame Type | `ERROR` (9) |
+| `01` | `00` | Flags | `0` |
+| `02–03` | `00 09` | Payload Length | 9 bytes |
+| `04–05` | `00 02` | Error Code (`u16be`)| `AUTH_FAILED` (2) |
+| `06` | `06` | Message Length (`u8`)| 6 bytes |
+| `07–12` | `66 61 69 6c 65 64` | Message (`UTF-8`)| `"failed"` |
+
+---
+
+## 10. DISCONNECT Frame (Type 10)
+
+Client signals normal clean teardown with code `0`:
+
+```text
+0a 00 00 02 00 00
+```
+
+### Breakdown (6 bytes total)
+
+| Byte Offset | Hex Bytes | Field Name | Decoded Value |
+|---|---|---|---|
+| `00` | `0a` | Frame Type | `DISCONNECT` (10) |
+| `01` | `00` | Flags | `0` |
+| `02–03` | `00 02` | Payload Length | 2 bytes |
+| `04–05` | `00 00` | Code (`u16be`) | `0` |

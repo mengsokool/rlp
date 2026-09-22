@@ -1,0 +1,187 @@
+---
+title: "Packet Types Catalog"
+description: "Comprehensive binary wire specification for all 10 RLP v1 packet types, directions, and payload structures."
+keywords: ["RLP", "packets", "HELLO", "WELCOME", "DATA", "BATCH", "COMMAND", "ACK", "PING", "ERROR"]
+---
+
+# Packet Types Catalog
+
+This document specifies the exact wire format, permitted direction, allowed flags, and payload fields for all 10 packet types defined in RLP Version 1.
+
+---
+
+## Packet Summary Table
+
+| Code | Symbolic Name | Permitted Direction | Allowed Frame Flags | Primary Purpose |
+|---|---|---|---|---|
+| `1` | `HELLO` | Client $\to$ Server | `0x00` | Connection initiation, authentication, and capability negotiation |
+| `2` | `WELCOME` | Server $\to$ Client | `0x00` | Acknowledge authentication and exchange server capabilities |
+| `3` | `DATA` | Client $\to$ Server | `0x00`, `0x01` | Transmit single telemetry sample |
+| `4` | `BATCH` | Client $\to$ Server | `0x00` | Transmit array of telemetry samples |
+| `5` | `COMMAND` | Server $\to$ Client | `0x00` | Issue actuator or control instruction to device |
+| `6` | `ACK` | Client $\to$ Server | `0x00` | Report command execution result |
+| `7` | `PING` | Bidirectional | `0x00` | Liveness check |
+| `8` | `PONG` | Bidirectional | `0x00` | Liveness response |
+| `9` | `ERROR` | Bidirectional | `0x00` | Report fatal protocol error and terminate session |
+| `10` | `DISCONNECT`| Bidirectional | `0x00` | Orderly connection termination |
+
+---
+
+## 1. Type 1: HELLO (Client $\to$ Server)
+
+The client **MUST** send `HELLO` as the first frame over an established transport connection.
+
+```
++---------------+------------------+-------------------+----------------------+
+| Version (u8)  | Device ID (lp8)  | Credential (lp16) | Capabilities (lp16)  |
+| 1 byte        | 1 + L bytes      | 2 + L bytes       | 2 + L bytes          |
++---------------+------------------+-------------------+----------------------+
+```
+
+- **`Version` (`u8`):** Protocol version. In RLP v1, the client **MUST** set this to `1`.
+- **`Device ID` (`lp8`):** UTF-8 client identifier (1-byte length prefix, max 255 bytes).
+- **`Credential` (`lp16`):** Opaque authentication token or cryptographic proof (2-byte length prefix, max 65,535 bytes).
+- **`Capabilities` (`lp16`):** Client feature flags or metadata (2-byte length prefix, max 65,535 bytes).
+- **Flags:** MUST be `0x00`. Non-zero flags **MUST** trigger `INVALID_PACKET`.
+
+---
+
+## 2. Type 2: WELCOME (Server $\to$ Client)
+
+Sent by the server immediately after successful authentication of a client `HELLO`.
+
+```
++---------------+----------------------+
+| Version (u8)  | Capabilities (lp16)  |
+| 1 byte        | 2 + L bytes          |
++---------------+----------------------+
+```
+
+- **`Version` (`u8`):** Protocol version confirmed by server (`1`).
+- **`Capabilities` (`lp16`):** Server capabilities or configuration bytes (2-byte length prefix).
+- **Flags:** MUST be `0x00`.
+
+---
+
+## 3. Type 3: DATA (Client $\to$ Server)
+
+Transmits an individual sensor telemetry sample on an active session.
+
+- **Flags:**
+  - `0x00`: Standard telemetry sample without timestamp.
+  - `0x01` (`HAS_TIMESTAMP`): Telemetry sample with 8-byte `i64be` Unix timestamp in milliseconds.
+  - Any other flag bits **MUST** trigger `INVALID_PACKET`.
+- **Payload:** Formatted according to the Sample structure defined in [Value Types](/docs/spec/data-types#4-telemetry-sample-structure).
+
+---
+
+## 4. Type 4: BATCH (Client $\to$ Server)
+
+Transmits multiple telemetry samples within a single atomic frame.
+
+```
++--------------------+---------------------------------------------------+
+| Count (u16be)      | Array of Sample Records (Count iterations)        |
+| 2 bytes            |                                                   |
++--------------------+---------------------------------------------------+
+```
+
+Each record inside the batch contains its own sample flags:
+```
++--------------------+-------------------+------------------+-----------------------+---------------+
+| Sample Flags (u8)  | Channel (u16be)   | Value Type (u8)  | [Timestamp (i64be)]   | Value Payload |
+| 1 byte             | 2 bytes           | 1 byte           | 8 bytes (if bit 0=1)  | variable      |
++--------------------+-------------------+------------------+-----------------------+---------------+
+```
+
+- **`Count` (`u16be`):** Number of sample records (`0` to `65,535`).
+- **`Sample Flags` (`u8`):** Bit 0 indicates if this record contains an 8-byte timestamp. Bits 1–7 **MUST** be `0`.
+- **Frame Flags:** The outer frame header flags **MUST** be `0x00`.
+
+---
+
+## 5. Type 5: COMMAND (Server $\to$ Client)
+
+Dispatches an actuator or control command to an active device.
+
+```
++-----------------+-------------------+------------------+-----------------------+
+| ID (u32be)      | Channel (u16be)   | Value Type (u8)  | Value Payload         |
+| 4 bytes         | 2 bytes           | 1 byte           | variable              |
++-----------------+-------------------+------------------+-----------------------+
+```
+
+- **`ID` (`u32be`):** Command identifier assigned monotonically by the server modulo $2^{32}$.
+- **`Channel` (`u16be`):** Target actuator channel.
+- **`Value Type` (`u8`):** Value type code (`1` to `13`).
+- **`Value Payload`:** Encoded command argument.
+- **Timestamp Prohibition:** Commands **MUST NOT** include timestamps. If a command frame has bit 0 set, receivers **MUST** reject it with `INVALID_PACKET` ("timestamp not allowed").
+
+---
+
+## 6. Type 6: ACK (Client $\to$ Server)
+
+Reports the execution result of a received `COMMAND`.
+
+```
++-----------------+-------------------+
+| ID (u32be)      | Status (u8)       |
+| 4 bytes         | 1 byte            |
++-----------------+-------------------+
+```
+
+- **`ID` (`u32be`):** Matches the command `ID` being acknowledged.
+- **`Status` (`u8`):** Execution outcome code:
+  - `0`: `OK` — Execution succeeded.
+  - `1`: `REJECTED` — Client refused to execute the command.
+  - `2`: `UNSUPPORTED` — Target channel or value type is not supported by device.
+  - `3`: `FAILED` — Actuation failed during execution.
+
+---
+
+## 7. Types 7 & 8: PING and PONG (Bidirectional)
+
+Used for connection keep-alive and latency measurement.
+
+```
++--------------------+
+| Nonce (u32be)      |
+| 4 bytes            |
++--------------------+
+```
+
+- **`Nonce` (`u32be`):** Arbitrary 32-bit token.
+- **Echo Rule:** When an endpoint receives `PING`, it **MUST** immediately reply with `PONG` containing the identical `Nonce` value.
+
+---
+
+## 8. Type 9: ERROR (Bidirectional)
+
+Communicates an unrecoverable protocol error.
+
+```
++--------------------+----------------------+
+| Code (u16be)       | Message (lp8)        |
+| 2 bytes            | 1 + L bytes          |
++--------------------+----------------------+
+```
+
+- **`Code` (`u16be`):** Error code from the standardized [Error Codes](/docs/spec/errors) table.
+- **`Message` (`lp8`):** UTF-8 diagnostic string (max 255 bytes).
+- **Teardown Rule:** Sending or receiving an `ERROR` packet transitions the session to `CLOSED` and terminates the underlying transport stream.
+
+---
+
+## 9. Type 10: DISCONNECT (Bidirectional)
+
+Signals an orderly disconnection.
+
+```
++--------------------+
+| Code (u16be)       |
+| 2 bytes            |
++--------------------+
+```
+
+- **`Code` (`u16be`):** Reason code (`0` indicates normal shutdown, or an `ErrorCode`).
+- **Teardown Rule:** Upon receiving `DISCONNECT`, the recipient **MUST** close the transport stream cleanly.

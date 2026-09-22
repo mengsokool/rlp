@@ -1,0 +1,55 @@
+---
+title: "Conformance & Verification Checklist"
+description: "A testable conformance checklist for verifying independent client and server RLP v1 implementations."
+keywords: ["RLP", "conformance", "checklist", "verification", "testing", "interoperability", "RFC 2119"]
+---
+
+# Conformance Checklist
+
+This checklist provides a testable matrix for developers building or verifying independent RLP Version 1 client and server implementations.
+
+---
+
+## 1. Framing and Transport Layer
+
+- [ ] **Header Size:** Every frame begins with exactly 4 bytes (`type: u8`, `flags: u8`, `payload_length: u16be`).
+- [ ] **Endianness:** All multi-byte numeric fields are encoded in network byte order (big-endian).
+- [ ] **TCP Stream Handling:** The parser handles TCP segmentation (packets split across chunk reads) and TCP coalescing (multiple frames in one chunk read).
+- [ ] **Memory Protection:** The receiver verifies that `payload_length <= maxFrameSize` before allocating memory. If exceeded, it emits `FRAME_TOO_LARGE` (4) and closes the socket.
+- [ ] **Backpressure Control:** The sender bounds outbound memory queues when sockets block, disconnecting unresponsive peers with `SLOW_PEER` (9).
+
+---
+
+## 2. Encoding and Decoding Validation
+
+- [ ] **Strict Flags:** The receiver rejects non-zero `Flags` on all packet types except `DATA` with `INVALID_PACKET` (5).
+- [ ] **Data Flags:** On `DATA` frames, the receiver rejects any flag bit other than bit 0 (`HAS_TIMESTAMP`) with `INVALID_PACKET` (5).
+- [ ] **Value Type Range:** The receiver rejects `ValueType` integers outside the range `1` to `13` with `UNSUPPORTED_TYPE` (7).
+- [ ] **Strict Boolean Values:** The receiver verifies that `BOOL` values are strictly `0x00` or `0x01`. Any byte $\ge 0x02$ triggers `INVALID_PACKET` (5).
+- [ ] **Strict UTF-8:** The receiver validates that `STRING` types contain valid UTF-8 sequences. Malformed sequences trigger `INVALID_PACKET` (5).
+- [ ] **Exact Payload Consumption:** The receiver verifies that exactly `payload_length` bytes are consumed. Truncated payloads or unconsumed trailing bytes trigger `INVALID_PACKET` (5).
+- [ ] **Command Timestamps Forbidden:** The receiver rejects `COMMAND` frames that specify timestamp flags with `INVALID_PACKET` ("timestamp not allowed").
+
+---
+
+## 3. Connection Handshake and State Machine
+
+- [ ] **Initial State:** Connections start in `WAITING_HELLO`.
+- [ ] **Mandatory First Frame:** Any packet other than `HELLO` received in `WAITING_HELLO` triggers `INVALID_STATE` (6).
+- [ ] **Version Negotiation:** The server rejects client versions other than `1` with `UNSUPPORTED_VERSION` (1).
+- [ ] **Duplicate HELLO:** A `HELLO` frame received in the `ACTIVE` state triggers `INVALID_STATE` (6).
+- [ ] **Directional Rules:**
+  - A server rejects client-sent `WELCOME` or `COMMAND` with `INVALID_STATE` (6).
+  - A client rejects server-sent `HELLO`, `DATA`, `BATCH`, or `ACK` with `INVALID_STATE` (6).
+- [ ] **Closed State:** Any frame received after connection closure triggers `INVALID_STATE` (6).
+- [ ] **Handshake Timeout:** The server terminates connections that fail to authenticate within the configured handshake window.
+- [ ] **Single Active Session per Device:** When a device reconnects, the server closes the prior connection socket before activating the new session.
+
+---
+
+## 4. Heartbeat and Error Handling
+
+- [ ] **Nonce Echo:** When receiving `PING`, the endpoint immediately returns `PONG` containing the identical `nonce` value.
+- [ ] **Error Teardown:** When sending or receiving `ERROR`, the endpoint transitions to `CLOSED` and terminates the underlying transport stream.
+- [ ] **Safe Error Messages:** Error diagnostic messages omit sensitive internal server details and credentials.
+- [ ] **Orderly Disconnect:** Upon receiving `DISCONNECT`, the endpoint gracefully closes the transport stream.

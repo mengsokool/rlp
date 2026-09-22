@@ -1,0 +1,98 @@
+---
+title: "Introduction & Architecture"
+description: "High-level overview, architectural principles, and core design of the Raina Link Protocol (RLP) v1."
+keywords: ["RLP", "architecture", "binary protocol", "IoT", "TCP", "embedded"]
+---
+
+# Raina Link Protocol (RLP)
+
+**Raina Link Protocol (RLP)** is a lightweight, bidirectional, binary application protocol designed for persistent 1:1 communication between IoT client devices and a central application server.
+
+It is deliberately narrower than general-purpose publish-subscribe protocols: RLP is designed specifically for **devices that just need to talk directly to an application server**.
+
+<Note type="note">
+This documentation reflects the audited **RLP Version 1 Specification**. All wire layouts, bit fields, state machines, and error behaviors are grounded in the reference implementation.
+</Note>
+
+---
+
+## High-Level Topology
+
+In RLP, each device establishes a direct, persistent transport connection (TCP or TLS) to the application server that manages it:
+
+```
++-------------------------------------------------------------------+
+|                           RLP Session                             |
+|  +-------------------+                     +-------------------+  |
+|  |     IoT Client    | <--- TCP / TLS ---> | Application Server|  |
+|  +-------------------+                     +-------------------+  |
+|    - Single Device                           - Direct Connection  |
+|    - Sensor Telemetry                        - Channel Routing    |
+|    - Command Execution                       - Device Lifecycle   |
++-------------------------------------------------------------------+
+```
+
+Unlike broker-based architectures:
+- There is **no broker** intermediary.
+- There are **no topic strings** or subscription trees.
+- There are **no retained messages** or multi-stage QoS 2 handshakes.
+- The connection itself represents the device context once authenticated.
+
+---
+
+## Core Design Principles
+
+### 1. Minimal Fixed Header Overhead
+Every RLP frame starts with a deterministic **4-byte frame header**:
+- 1 byte packet type (`u8`)
+- 1 byte flags (`u8`)
+- 2 bytes payload length (`u16be`)
+
+Telemetry samples on the hot path require as few as 4 payload bytes, allowing frequent sensor updates without saturating constrained wireless links.
+
+### 2. Implicit Device Identity
+During initial connection establishment, the client transmits a `HELLO` packet containing its unique device identifier and credentials. Once the server accepts authentication and responds with `WELCOME`, the physical transport connection is bound to that device.
+
+Subsequent telemetry frames (`DATA` and `BATCH`) **omit the device identifier entirely**, eliminating per-packet identity overhead.
+
+### 3. Numeric Channels
+Sensors, actuators, and telemetry metrics are addressed by unsigned 16-bit integer channel numbers (`0` through `65,535`). This avoids string parsing, reduces frame size, and maps directly to microcontroller register addresses.
+
+### 4. Big-Endian Wire Encoding
+All multibyte integers and IEEE-754 floating-point numbers are encoded in network byte order (big-endian).
+
+---
+
+## Comparison: RLP vs Other Protocols
+
+| Dimension | RLP v1 | MQTT (v3.1.1 / v5.0) | HTTP/2 / REST |
+|---|---|---|---|
+| **Topology** | Direct 1:1 Client-Server | Broker / Pub-Sub (N:M) | Request-Response |
+| **Framing** | Fixed 4-byte binary header | Variable 2–5 byte header | Stream / Frame headers |
+| **Telemetry Addressing**| Numeric channels (`u16be`) | Topic strings (e.g. `sensors/temp`) | URI Paths |
+| **Per-packet Device ID**| None (Implicit after auth) | None (Broker maintains client ID) | Usually in URL or Headers |
+| **Command Delivery** | Server-to-Client `COMMAND` | Subscribed topic message | Polling or WebSocket |
+| **Server Footprint** | ~90 MB RSS for 10,000 devices | Varies by broker implementation | Higher overhead |
+| **Ideal Use Case** | Devices talking directly to their backend | Fleet broadcast, many-to-many routing | Web and API consumption |
+
+---
+
+## Requirements Language
+
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY**, and **OPTIONAL** in this document are to be interpreted as described in [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119) and [RFC 8174](https://datatracker.ietf.org/doc/html/rfc8174).
+
+---
+
+## Documentation Map
+
+- [Getting Started](/docs/getting-started): Install `@raina-iot/rlp`, launch a server, and connect your first device.
+- [Framing & Stream Handling](/docs/spec/framing): Learn the 4-byte header layout, framing flags, and TCP stream reassembly.
+- [Value Types & Encodings](/docs/spec/data-types): Review the 13 supported data types and payload formatting.
+- [Packet Types Catalog](/docs/spec/packets): Examine wire layouts for all 10 packet types.
+- [Connection Lifecycle](/docs/spec/lifecycle): Understand session states, transitions, and timers.
+- [Error Codes & Handling](/docs/spec/errors): Review error codes and fault mitigation.
+- [Wire Frames & Hex Dumps](/docs/examples/wire-frames): Inspect byte-for-byte packet dumps.
+- [End-to-End Session Trace](/docs/examples/session-trace): Walk through a full client-server conversation.
+- [Embedded C Implementation](/docs/implementation/embedded-c): Implement an efficient client in C for microcontrollers.
+- [Conformance Checklist](/docs/implementation/conformance): Test an independent implementation against RLP requirements.
+- [Benchmark & Capacity Results](/docs/benchmarks/results): Review empirical test results with 10,000 active devices.

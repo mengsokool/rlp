@@ -1,0 +1,52 @@
+name: docs.beenut CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: search-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate search content
+        run: pnpm run generate-content-json
+
+      - name: Build docs site
+        run: pnpm run build
+
+      - name: Upload search data artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: search-data
+          path: public/search-data/
+          retention-days: 30

@@ -1,0 +1,76 @@
+---
+title: "Error Codes & Handling"
+description: "Standardized RLP error codes, triggering conditions, fault reporting, and connection teardown procedures."
+keywords: ["RLP", "errors", "error codes", "fault handling", "MALFORMED_FRAME", "INVALID_PACKET", "SLOW_PEER"]
+---
+
+# Error Codes & Handling
+
+This document specifies the standardized error codes, triggering conditions, wire representation, and recovery/teardown semantics for RLP Version 1.
+
+---
+
+## 1. ErrorCode Enumeration Table
+
+RLP defines 9 standardized error codes:
+
+| Code | Symbolic Name | Exact Triggering Condition | Frame Generated |
+|---|---|---|---|
+| `1` | `UNSUPPORTED_VERSION` | Version byte in `HELLO` is not `1`. | Server sends `ERROR(1, ...)` then closes. |
+| `2` | `AUTH_FAILED` | Application authentication hook rejects credentials. | Server sends `ERROR(2, ...)` then closes. |
+| `3` | `MALFORMED_FRAME` | Stream corruption or unparseable framing bytes. | Endpoint sends `ERROR(3, ...)` then closes. |
+| `4` | `FRAME_TOO_LARGE` | Header `payload_length` exceeds `maxFrameSize`. | Receiver sends `ERROR(4, ...)` then closes. |
+| `5` | `INVALID_PACKET` | Non-zero flags on forbidden packets, invalid `BOOL` ($> 1$), bad UTF-8, truncated data, unconsumed trailing bytes, or timestamp in `COMMAND`. | Receiver sends `ERROR(5, ...)` then closes. |
+| `6` | `INVALID_STATE` | Packet received in improper state, duplicate `HELLO`, or packet direction violation. | Receiver sends `ERROR(6, ...)` then closes. |
+| `7` | `UNSUPPORTED_TYPE` | `ValueType` integer is $< 1$ or $> 13$. | Receiver sends `ERROR(7, ...)` then closes. |
+| `8` | `HANDSHAKE_TIMEOUT` | Client did not authenticate within the handshake window. | Server sends `ERROR(8, ...)` then closes. |
+| `9` | `SLOW_PEER` | Outbound socket queue exceeds maximum allowable buffer. | Sender sends `ERROR(9, ...)` then closes. |
+
+---
+
+## 2. ERROR Frame Wire Layout
+
+When an endpoint detects a fatal condition, it communicates the failure using an `ERROR` packet (Type 9):
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Type = 9     |  Flags = 0    |     Payload Length (u16be)    |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|          Code (u16be)         |Msg Len(u8)| UTF-8 Message ... |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+### Fields
+
+* **`Code` (`u16be`):** The 16-bit error code from the table above.
+* **`Message Length` (`u8`):** Byte length of the error description (`0` to `255`).
+* **`Message Text` (variable):** UTF-8 encoded diagnostic string.
+
+<Note type="caution">
+**Security Guidance:** Senders **MUST NOT** expose sensitive internal server details, database credentials, or server stack traces in the `Message` string.
+</Note>
+
+---
+
+## 3. Teardown Semantics
+
+1. When a protocol violation or unrecoverable error occurs, the observing endpoint **MUST**:
+   - Transmit an `ERROR` frame to the peer (if the underlying transport socket is still writable).
+   - Immediately transition the local session state to `CLOSED`.
+   - Terminate the underlying transport stream (`socket.end()` or close).
+2. Upon receiving an `ERROR` frame, the peer **MUST**:
+   - Transition its session state to `CLOSED`.
+   - Terminate the transport connection.
+   - Dispatch the error event to the host application.
+
+---
+
+## 4. Reconnection Guidance for Clients
+
+When an RLP client experiences an unexpected disconnect or receives an `ERROR` frame:
+
+* The client **SHOULD** implement an **exponential backoff with jitter** algorithm before attempting to reconnect.
+* **Example Schedule:** Wait 1s, 2s, 4s, 8s, 16s, up to a maximum cap of 30s or 60s, with $\pm 20\%$ randomized jitter.
+* Clients **MUST NOT** flood the server with immediate un-throttled reconnect loops, as this exacerbates server-side overload.

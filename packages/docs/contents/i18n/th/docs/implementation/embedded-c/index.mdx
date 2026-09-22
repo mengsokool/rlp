@@ -1,0 +1,156 @@
+---
+title: "คู่มือฝั่ง Embedded C Client"
+description: "แนวทางการพัฒนา RLP Client ด้วยภาษา C สำหรับ Microcontroller ที่มีข้อจำกัดด้านหน่วยความจำ (ESP32, STM32, nRF52, RP2040)"
+keywords: ["RLP", "C", "embedded", "microcontroller", "ESP32", "STM32", "zero-copy", "framing"]
+---
+
+# คู่มือการพัฒนา Client ด้วยภาษา C
+
+เอกสารนี้อธิบายแนวทางการพัฒนา RLP Version 1 Client ด้วยภาษา C ที่ปลอดภัยต่อหน่วยความจำ (Memory-Safe) และไม่จำเป็นต้องจอง Memory ซ้ำซ้อน (Zero-Copy) สำหรับ Microcontroller เช่น ESP32, STM32, nRF52 และ RP2040
+
+---
+
+## 1. ตัวแยกส่วน Header (`rlp_frame.h`)
+
+บนระบบสมองกลฝังตัว (Microcontroller) การแปลง Pointer ของ Buffer เครือข่ายไปเป็น C `struct` ตรง ๆ (Type punning) มักทำให้เกิด Hardware Fault จากปัญหาการเข้าถึง Memory ที่ไม่ตรง Alignment (เช่น ARM Cortex-M0/M3 Unaligned Access)
+
+RLP จึงเตรียม Header File ภาษา C แบบ Standalone (`examples/c/rlp_frame.h`) ที่ใช้วิธีอ่านข้อมูลทีละไบต์อย่างปลอดภัย:
+
+```c
+#ifndef RLP_FRAME_H
+#define RLP_FRAME_H
+
+#include <stdint.h>
+
+/* Header มีขนาด 4 ไบต์เสมอ ห้าม Cast บัฟเฟอร์เครือข่ายเป็น struct ตรงๆ */
+#define RLP_HEADER_SIZE 4
+
+static inline uint16_t rlp_u16be(const uint8_t *p) {
+    return ((uint16_t)p[0] << 8) | (uint16_t)p[1];
+}
+
+/**
+ * คืนค่า 1 เมื่อมีเฟรมที่สมบูรณ์และขนาดถูกต้องอยู่ใน Buffer เท่านั้น
+ *
+ * @param p Pointer ของ Buffer
+ * @param available จำนวนไบต์ที่พร้อมให้อ่านใน Buffer
+ * @param max ขนาด Payload สูงสุดที่อนุญาต
+ * @param type Pointer สำหรับรับค่าชนิดของเฟรม
+ * @param flags Pointer สำหรับรับค่า Flags
+ * @param length Pointer สำหรับรับค่าความยาวของ Payload
+ */
+static inline int rlp_frame_header(const uint8_t *p, uint32_t available, uint16_t max,
+                                   uint8_t *type, uint8_t *flags, uint16_t *length) {
+    if (available < RLP_HEADER_SIZE) return 0;
+
+    *type   = p[0];
+    *flags  = p[1];
+    *length = rlp_u16be(p + 2);
+
+    return *length <= max && available >= (uint32_t)RLP_HEADER_SIZE + *length;
+}
+
+#endif /* RLP_FRAME_H */
+```
+
+---
+
+## 2. การ Encode ข้อมูล Telemetry ในภาษา C
+
+ด้วยความที่ Header ของ RLP มีขนาดคงที่ 4 ไบต์ การสร้างเฟรมส่งข้อมูล Telemetry จึงสามารถทำบน Stack Buffer ขนาดเล็กได้ทันที โดยไม่ต้องพึ่งพาคำสั่ง `malloc()`:
+
+### ตัวอย่าง: การ Encode ข้อมูลทศนิยม FLOAT32
+
+```c
+#include <string.h>
+#include <stdint.h>
+#include "rlp_frame.h"
+
+#define PACKET_TYPE_DATA 3
+#define VALUE_TYPE_FLOAT32 10
+
+/**
+ * ฟังก์ชันสร้างเฟรมข้อมูล FLOAT32 บน Channel ที่กำหนด (ไม่มี Timestamp)
+ * ขนาดเฟรมรวม: 4 (Header) + 2 (Channel) + 1 (Type) + 4 (Float) = 11 ไบต์
+ */
+int encode_telemetry_float(uint8_t *out_buf, uint16_t channel, float value) {
+    // 1. Frame Header (4 ไบต์)
+    out_buf[0] = PACKET_TYPE_DATA;
+    out_buf[1] = 0x00;             // Flags: ไม่มี Timestamp
+    out_buf[2] = 0x00;             // Length ไบต์บน
+    out_buf[3] = 0x07;             // Length ไบต์ล่าง (Payload ยาว 7 ไบต์)
+
+    // 2. Channel (u16be)
+    out_buf[4] = (uint8_t)(channel >> 8);
+    out_buf[5] = (uint8_t)(channel & 0xFF);
+
+    // 3. Value Type
+    out_buf[6] = VALUE_TYPE_FLOAT32;
+
+    // 4. Value (IEEE-754 Single-Precision Float แบบ Big-Endian)
+    uint32_t float_bits;
+    memcpy(&float_bits, &value, sizeof(float));
+
+    out_buf[7]  = (uint8_t)(float_bits >> 24);
+    out_buf[8]  = (uint8_t)(float_bits >> 16);
+    out_buf[9]  = (uint8_t)(float_bits >> 8);
+    out_buf[10] = (uint8_t)(float_bits & 0xFF);
+
+    return 11; // คืนค่าจำนวนไบต์ที่ต้องเขียนลง Socket
+}
+```
+
+---
+
+## 3. การรับคำสั่ง COMMAND และส่ง ACK ตอบกลับ
+
+เมื่อเซิร์ฟเวอร์ส่ง `COMMAND` ลงมา ตัวอุปกรณ์จะอ่าน Command ID และ Channel ควบคุมขา Hardware แล้วส่ง `ACK` ยืนยันกลับไป:
+
+```c
+#define PACKET_TYPE_COMMAND 5
+#define PACKET_TYPE_ACK     6
+
+void handle_incoming_command(int socket_fd, const uint8_t *payload, uint16_t length) {
+    if (length < 8) return; // Command อย่างน้อยต้องมี 4 (ID) + 2 (Ch) + 1 (Type) + 1 (Val)
+
+    uint32_t cmd_id = ((uint32_t)payload[0] << 24) |
+                      ((uint32_t)payload[1] << 16) |
+                      ((uint32_t)payload[2] << 8)  |
+                      (uint32_t)payload[3];
+
+    uint16_t channel = rlp_u16be(payload + 4);
+    uint8_t val_type = payload[6];
+    uint8_t val      = payload[7];
+
+    uint8_t status = 0; // OK
+
+    if (channel == 2 && val_type == 1 /* BOOL */) {
+        set_gpio_relay_state(val == 1);
+    } else {
+        status = 2; // UNSUPPORTED
+    }
+
+    // สร้างเฟรม ACK ตอบกลับ (ขนาดรวม 9 ไบต์)
+    uint8_t ack_frame[9];
+    ack_frame[0] = PACKET_TYPE_ACK;
+    ack_frame[1] = 0x00; // Flags
+    ack_frame[2] = 0x00;
+    ack_frame[3] = 0x05; // Length = 5
+
+    ack_frame[4] = (uint8_t)(cmd_id >> 24);
+    ack_frame[5] = (uint8_t)(cmd_id >> 16);
+    ack_frame[6] = (uint8_t)(cmd_id >> 8);
+    ack_frame[7] = (uint8_t)(cmd_id & 0xFF);
+    ack_frame[8] = status;
+
+    send(socket_fd, ack_frame, 9, 0);
+}
+```
+
+---
+
+## 4. แนวปฏิบัติที่ดีสำหรับ Microcontroller
+
+1. **ใช้ Static Buffer:** กำหนดขนาด Buffer แบบคงที่ (เช่น Static Ring Buffer) สำหรับรับ TCP Stream หลีกเลี่ยงการใช้ Dynamic Memory Allocation (`malloc`)
+2. **ตรวจ Bounds เสมอ:** อย่าอ่านเกินจำนวนไบต์ที่รับเข้ามาจริง (`available`) ส่งค่าขนาดสูงสุดไปตรวจสอบใน `rlp_frame_header()` เสมอ
+3. **ระบบ Keep-Alive:** กำหนด Hardware Timer ให้ส่ง `PING` ทุก 30–60 วินาที หากไม่มีการส่งข้อมูลเซนเซอร์ เพื่อป้องกัน NAT Timeout

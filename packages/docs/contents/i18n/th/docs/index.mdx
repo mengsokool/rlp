@@ -1,0 +1,98 @@
+---
+title: "ภาพรวมและสถาปัตยกรรม RLP"
+description: "ภาพรวมเชิงสถาปัตยกรรม แนวคิดการออกแบบ และโครงสร้างหลักของ Raina Link Protocol (RLP) v1"
+keywords: ["RLP", "สถาปัตยกรรม", "ไบนารีโปรโตคอล", "IoT", "TCP", "embedded"]
+---
+
+# Raina Link Protocol (RLP)
+
+**Raina Link Protocol (RLP)** คือไบนารีแอปพลิเคชันโปรโตคอลแบบสองทิศทาง (Bidirectional) ที่มีขนาดกะทัดรัด ออกแบบมาสำหรับการเชื่อมต่อแบบคงอยู่ (Persistent 1:1 Connection) ระหว่างอุปกรณ์ลูกข่าย IoT (Client Device) กับแอปพลิเคชันเซิร์ฟเวอร์ส่วนกลาง (Application Server)
+
+RLP ถูกจำกัดขอบเขตให้แคบและเฉพาะเจาะจงกว่าระบบ Publish-Subscribe ทั่วไป โดยเน้นตอบโจทย์ **"อุปกรณ์ที่แค่ต้องการคุยกับเซิร์ฟเวอร์ของตัวเองโดยตรง"** ให้มีประสิทธิภาพสูงสุด
+
+<Note type="note">
+เอกสารชุดนี้อ้างอิงจาก **ข้อกำหนดมาตรฐาน RLP Version 1 (Audited Specification)** โครงสร้างระดับไบต์ ฟิลด์ข้อมูล การเปลี่ยนสถานะ และการจัดการข้อผิดพลาดทั้งหมดสอดคล้องกับ Reference Implementation ทุกประการ
+</Note>
+
+---
+
+## สถาปัตยกรรมการเชื่อมต่อระดับสูง
+
+ใน RLP อุปกรณ์แต่ละชิ้นจะเปิด Persistent Transport Connection (ผ่าน TCP หรือ TLS) ตรงไปยัง Application Server ที่ดูแลอุปกรณ์นั้นเพียงจุดเดียว:
+
+```
++-------------------------------------------------------------------+
+|                           RLP Session                             |
+|  +-------------------+                     +-------------------+  |
+|  |     IoT Client    | <--- TCP / TLS ---> | Application Server|  |
+|  +-------------------+                     +-------------------+  |
+|    - เชื่อมต่อตัวต่อตัว                      - ควบคุมการเชื่อมต่อโดยตรง |
+|    - ส่งค่าเซนเซอร์ Telemetry                - กระจายข้อมูลตาม Channel  |
+|    - รับคำสั่งควบคุม (Command)               - จัดการ Session อุปกรณ์  |
++-------------------------------------------------------------------+
+```
+
+สิ่งที่แตกต่างจากระบบที่มี Broker คั่นกลาง:
+- **ไม่มีตัวกลาง Broker** คอยรับส่งต่อ
+- **ไม่มี Topic Strings** หรือแผนผังการ Subscribe ที่ซับซ้อน
+- **ไม่มี Retained Message** หรือกระบวนการ Handshake หลายขั้นตอนของ QoS 2
+- เมื่อยืนยันตัวตนสำเร็จ การเชื่อมต่อของ Socket นั้นจะทำหน้าที่แทนตัวตนของอุปกรณ์ทันที
+
+---
+
+## เสาหลักในการออกแบบ (Design Principles)
+
+### 1. Overhead ของ Header มีขนาดคงที่และเล็กมาก
+ทุกเฟรมของ RLP จะเริ่มต้นด้วย **Frame Header ขนาดคงที่เพียง 4 ไบต์**:
+- Packet Type 1 ไบต์ (`u8`)
+- Flags 1 ไบต์ (`u8`)
+- Payload Length 2 ไบต์ (`u16be`)
+
+ใน Hot Path ของการส่งค่า Telemetry สามารถส่งข้อมูลโดยมี Payload เล็กสุดเพียง 4 ไบต์ ทำให้ส่งข้อมูลเซนเซอร์ได้อย่างต่อเนื่องโดยไม่เปลืองแบนด์วิดท์ของระบบเครือข่ายไร้สาย
+
+### 2. ตัวตนอุปกรณ์แบบ Implicit (ไม่ต้องแนบซ้ำ)
+ในช่วงเริ่มเชื่อมต่อ Client จะส่งแพ็กเก็ต `HELLO` ที่ระบุ Device ID และ Credential เมื่อ Server ตรวจสอบสิทธิ์ผ่านและตอบกลับด้วย `WELCOME` การเชื่อมต่อนั้นจะถูกผูกเข้ากับ Device ID ดังกล่าวทันที
+
+เฟรมข้อมูลถัดจากนั้น (`DATA` และ `BATCH`) **จึงไม่ต้องแนบ Device ID มาในทุก ๆ แพ็กเก็ตอีกต่อไป** ช่วยลด Overhead ในระยะยาวได้อย่างมหาศาล
+
+### 3. ช่องสัญญาณตัวเลข (Numeric Channels)
+เซนเซอร์ อุปกรณ์สั่งการ และตัวแปรระบบต่าง ๆ จะถูกอ้างอิงด้วยหมายเลขช่องสัญญาณขนาด 16-bit Unsigned Integer (`0` ถึง `65,535`) วิธีนี้ช่วยตัดภาระการทำ String Parsing ลดขนาดเฟรม และแมปเข้ากับ Memory/Register ของ Microcontroller ได้โดยตรง
+
+### 4. การเข้ารหัสแบบ Big-Endian มาตรฐาน
+ข้อมูลตัวเลขแบบหลายไบต์และทศนิยม IEEE-754 ทั้งหมดจะถูกจัดเก็บตามลำดับ Network Byte Order (Big-Endian) เสมอ
+
+---
+
+## ตารางเปรียบเทียบ: RLP กับโปรโตคอลอื่น
+
+| หัวข้อเปรียบเทียบ | RLP v1 | MQTT (v3.1.1 / v5.0) | HTTP/2 / REST |
+|---|---|---|---|
+| **รูปแบบสถาปัตยกรรม** | Client-Server 1:1 โดยตรง | Broker / Pub-Sub (N:M) | Request-Response |
+| **โครงสร้าง Header** | คงที่ 4 ไบต์ระดับไบนารี | ปรับขนาดได้ 2–5 ไบต์ | Stream / Frame Header |
+| **การระบุจุดรับส่งข้อมูล**| Numeric Channels (`u16be`) | Topic Strings (เช่น `sensors/temp`) | URI Paths |
+| **Device ID ต่อแพ็กเก็ต**| ไม่ต้องส่ง (ระบุครั้งเดียวตอนต่อ) | ไม่ต้องส่ง (Broker ผูก Client ID) | มักส่งซ้ำใน Header หรือ URL |
+| **การส่งคำสั่งลงอุปกรณ์**| เซิร์ฟเวอร์ส่ง `COMMAND` ตรงๆ | Publish ลง Topic ที่ Subscribe | Polling หรือ WebSocket |
+| **Server Footprint** | ใช้ RAM ~90 MB สำหรับ 10,000 อุปกรณ์ | ขึ้นอยู่กับตัว Broker | ใช้ทรัพยากรสูงกว่า |
+| **การใช้งานที่เหมาะสมที่สุด** | อุปกรณ์ส่งข้อมูลเข้า Server ตนเองโดยตรง | ส่งข้อมูลแบบกระจายหลายผู้รับ | ระบบเว็บและ API ทั่วไป |
+
+---
+
+## คำศัพท์เชิงข้อกำหนด (Requirements Language)
+
+คำสำคัญทางข้อกำหนด ได้แก่ **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY** และ **OPTIONAL** ในเอกสารชุดนี้ ให้ตีความตามมาตรฐาน [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119) และ [RFC 8174](https://datatracker.ietf.org/doc/html/rfc8174) เมื่อปรากฏเป็นตัวพิมพ์ใหญ่ทั้งหมด
+
+---
+
+## แผนผังเนื้อหาเอกสาร
+
+- [เริ่มต้นใช้งานและการติดตั้ง](/th/docs/getting-started): ติดตั้ง `@raina-iot/rlp` รันเซิร์ฟเวอร์ และเชื่อมต่ออุปกรณ์ตัวแรก
+- [โครงสร้างเฟรมและการจัดการ Stream](/th/docs/spec/framing): รายละเอียด Header 4 ไบต์, Framing Flags และการประกอบ Stream บน TCP
+- [ชนิดข้อมูล Value Types](/th/docs/spec/data-types): มาตรฐานชนิดข้อมูลทั้ง 13 ชนิด และโครงสร้าง Payload
+- [รายการ Packet Types ทั้งหมด](/th/docs/spec/packets): โครงสร้างระดับไบต์ของแพ็กเก็ตทั้ง 10 ชนิด
+- [วงจรการเชื่อมต่อและ State Machine](/th/docs/spec/lifecycle): สถานะของ Session, เงื่อนไขการเปลี่ยนสถานะ และ Handshake Timer
+- [รหัสข้อผิดพลาดและการจัดการ Error](/th/docs/spec/errors): ตาราง ErrorCode และพฤติกรรมเมื่อพบข้อผิดพลาด
+- [ตัวอย่างเฟรมและ Hex Dumps](/th/docs/examples/wire-frames): ตัวอย่าง Hex Dump แสดงข้อมูลจริงแบบไบต์ต่อไบต์
+- [ลำดับการทำงานตลอดทั้ง Session](/th/docs/examples/session-trace): จำลองการรับส่งข้อมูลจริงตั้งแต่ Handshake จนตัดการเชื่อมต่อ
+- [คู่มือฝั่ง Embedded C Client](/th/docs/implementation/embedded-c): แนวทางการเขียน Client ด้วยภาษา C บน Microcontroller
+- [เกณฑ์การตรวจสอบความสอดคล้อง](/th/docs/implementation/conformance): รายการ Checklist สำหรับผู้ที่ต้องการเขียน Library RLP
+- [ผลการทดสอบโหลดและ Capacity](/th/docs/benchmarks/results): สรุปผลการทดสอบประสิทธิภาพที่ 10,000 อุปกรณ์พร้อมกัน

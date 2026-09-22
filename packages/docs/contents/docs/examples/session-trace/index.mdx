@@ -1,0 +1,158 @@
+---
+title: "End-to-End Session Walkthrough"
+description: "A complete step-by-step trace of an RLP v1 session from TCP connection to handshake, telemetry, actuation, and clean teardown."
+keywords: ["RLP", "session", "walkthrough", "trace", "sequence diagram", "packet exchange", "lifecycle"]
+---
+
+# End-to-End Session Walkthrough
+
+This document traces an entire RLP Version 1 session lifecycle, illustrating the exact packet exchanges, state transitions, and byte sequences between an IoT device and an application server.
+
+---
+
+## Session Sequence Diagram
+
+```
+Client (Device "sensor-1")                              Application Server
+          │                                                       │
+          │──────────── 1. TCP Connection Established ───────────>│ [WAITING_HELLO]
+          │                                                       │
+          │──────────── 2. HELLO (v1, "sensor-1") ───────────────>│
+          │                                                       │ [Authenticate]
+          │<─────────── 3. WELCOME (v1) ──────────────────────────│ [State: ACTIVE]
+          │                                                       │
+          │──────────── 4. DATA (Ch 10, UINT16: 450) ────────────>│ Dispatches Telemetry
+          │                                                       │
+          │<─────────── 5. COMMAND (ID 1, Ch 2, BOOL: true) ──────│ Dispatches Command
+          │                                                       │
+          │──────────── 6. ACK (ID 1, Status: OK) ───────────────>│ Records Execution
+          │                                                       │
+          │──────────── 7. PING (Nonce: 0xCAFEBABE) ─────────────>│
+          │<─────────── 8. PONG (Nonce: 0xCAFEBABE) ─────────────│
+          │                                                       │
+          │──────────── 9. DISCONNECT (Code: 0) ─────────────────>│ Closes Stream
+          │<─────────── 10. Transport Closed ─────────────────────│ [State: CLOSED]
+```
+
+---
+
+## Step-by-Step Packet Trace
+
+### Step 1: Transport Connection Establishment
+- The client opens a TCP stream to the server port `9000`.
+- The server initializes an RLP connection, enters the `WAITING_HELLO` state, and starts a 10-second handshake timer.
+
+---
+
+### Step 2: Client Sends HELLO
+
+The client initiates the protocol session by identifying itself as `"sensor-1"` with credential `"ok"`:
+
+```text
+01 00 00 10 01 08 73 65 6e 73 6f 72 2d 31 00 02 6f 6b 00 00
+```
+
+* **Header (4 bytes):** Type `01` (`HELLO`), Flags `00`, Length `00 10` (16 bytes).
+* **Payload (16 bytes):**
+  * Version: `01` (`1`)
+  * Device ID (`lp8`): `08 73 65 6e 73 6f 72 2d 31` (length 8, `"sensor-1"`)
+  * Credential (`lp16`): `00 02 6f 6b` (length 2, `"ok"`)
+  * Capabilities (`lp16`): `00 00` (length 0)
+
+---
+
+### Step 3: Server Validates and Responds with WELCOME
+
+The server validates protocol version `1` and checks the credentials:
+- The handshake timer is canceled.
+- The session transitions to `AUTHENTICATED`, emits `WELCOME`, and transitions to `ACTIVE`.
+
+```text
+02 00 00 03 01 00 00
+```
+
+* **Header (4 bytes):** Type `02` (`WELCOME`), Flags `00`, Length `00 03` (3 bytes).
+* **Payload (3 bytes):**
+  * Version: `01` (`1`)
+  * Capabilities (`lp16`): `00 00` (length 0)
+
+---
+
+### Step 4: Client Transmits Sensor DATA
+
+The device transmits an unsigned 16-bit integer `450` (`0x01C2`) on channel `10` (`0x000A`):
+
+```text
+03 00 00 05 00 0a 05 01 c2
+```
+
+* **Header (4 bytes):** Type `03` (`DATA`), Flags `00` (no timestamp), Length `00 05` (5 bytes).
+* **Payload (5 bytes):**
+  * Channel: `00 0a` (Channel 10)
+  * Value Type: `05` (`UINT16`)
+  * Value: `01 c2` (450)
+
+The server receives the frame, verifies the session is in `ACTIVE`, and dispatches the sample to application listeners.
+
+---
+
+### Step 5: Server Issues Actuation COMMAND
+
+The application server commands the device to energize a physical relay on channel `2` with boolean value `true`:
+
+```text
+05 00 00 08 00 00 00 01 00 02 01 01
+```
+
+* **Header (4 bytes):** Type `05` (`COMMAND`), Flags `00`, Length `00 08` (8 bytes).
+* **Payload (8 bytes):**
+  * Command ID: `00 00 00 01` (ID `1`)
+  * Channel: `00 02` (Channel 2)
+  * Value Type: `01` (`BOOL`)
+  * Value: `01` (`true`)
+
+---
+
+### Step 6: Client Acknowledges Execution via ACK
+
+The device applies the relay state on hardware, then confirms successful execution:
+
+```text
+06 00 00 05 00 00 00 01 00
+```
+
+* **Header (4 bytes):** Type `06` (`ACK`), Flags `00`, Length `00 05` (5 bytes).
+* **Payload (5 bytes):**
+  * Command ID: `00 00 00 01` (ID `1`)
+  * Status: `00` (`OK`)
+
+---
+
+### Steps 7 & 8: Heartbeat Keep-Alive Exchange
+
+The client checks connection liveness by sending a `PING` with nonce `0xCAFEBABE`:
+
+```text
+07 00 00 04 ca fe ba be
+```
+
+The server immediately echoes the identical nonce in a `PONG` response:
+
+```text
+08 00 00 04 ca fe ba be
+```
+
+---
+
+### Steps 9 & 10: Clean Teardown
+
+The device enters a low-power maintenance mode and signals an orderly teardown:
+
+```text
+0a 00 00 02 00 00
+```
+
+* **Header (4 bytes):** Type `0a` (`DISCONNECT`), Flags `00`, Length `00 02` (2 bytes).
+* **Payload (2 bytes):** Code `00 00` (`0` = normal shutdown).
+
+The server transitions the session state to `CLOSED`, removes the device registration, and cleanly closes the underlying TCP socket.

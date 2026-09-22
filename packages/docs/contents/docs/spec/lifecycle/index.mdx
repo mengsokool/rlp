@@ -1,0 +1,115 @@
+---
+title: "Lifecycle & State Machine"
+description: "Specification of RLP v1 session states, transition rules, handshake timeouts, and concurrency policies."
+keywords: ["RLP", "lifecycle", "state machine", "handshake", "timeout", "authentication", "session"]
+---
+
+# Connection Lifecycle & State Machine
+
+This document specifies the session lifecycle, state transition rules, handshake timers, and device concurrency policies for RLP Version 1.
+
+---
+
+## 1. Session State Overview
+
+An RLP session progresses through five formal states:
+
+```
+               [ TCP / TLS Connected ]
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │  WAITING_HELLO  │
+                 └────────┬────────┘
+                          │
+                    Receive HELLO
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │  AUTHENTICATED  │
+                 └────────┬────────┘
+                          │
+                     Send WELCOME
+                          │
+                          ▼
+                 ┌─────────────────┐
+      ┌─────────>│     ACTIVE      │<─────────┐
+      │          └────────┬────────┘          │
+  DATA / BATCH            │             PING / PONG
+  COMMAND / ACK           │
+                          │
+           ERROR / DISCONNECT / Socket Drop
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │     CLOSED      │
+                 └─────────────────┘
+```
+
+---
+
+## 2. Formal Transition Rules
+
+| State | Permitted Inbound Packets | Next State | Error / Violation Behavior |
+|---|---|---|---|
+| **`WAITING_HELLO`** | `HELLO` only | Upon successful auth $\to$ `AUTHENTICATED` | Any packet other than `HELLO` **MUST** trigger `INVALID_STATE` (6). |
+| **`AUTHENTICATED`** | Internal state | Server transmits `WELCOME` $\to$ transitions to `ACTIVE` | N/A (intermediate state). |
+| **`ACTIVE`** | Client: `DATA`, `BATCH`, `ACK`, `PING`, `PONG`, `ERROR`, `DISCONNECT`<br/>Server: `COMMAND`, `PING`, `PONG`, `ERROR`, `DISCONNECT` | Remains `ACTIVE`. Transitions to `CLOSED` upon `ERROR`, `DISCONNECT`, or transport close. | `HELLO` received in `ACTIVE` **MUST** trigger `INVALID_STATE` ("duplicate HELLO").<br/>Client sending `WELCOME` or `COMMAND` **MUST** trigger `INVALID_STATE` ("packet direction invalid"). |
+| **`CLOSED`** | None | Terminal state. | Any packet received in `CLOSED` **MUST** trigger `INVALID_STATE` ("session is closed"). |
+
+---
+
+## 3. Directional Enforcement
+
+RLP strictly enforces message direction based on the peer's role:
+
+* **Client $\to$ Server Only:**
+  * `HELLO` (1)
+  * `DATA` (3)
+  * `BATCH` (4)
+  * `ACK` (6)
+* **Server $\to$ Client Only:**
+  * `WELCOME` (2)
+  * `COMMAND` (5)
+* **Bidirectional (Either Peer):**
+  * `PING` (7)
+  * `PONG` (8)
+  * `ERROR` (9)
+  * `DISCONNECT` (10)
+
+If a receiver receives a packet whose permitted direction is violated (e.g. a server receiving a `COMMAND` from a device), it **MUST** immediately fail the connection with `INVALID_STATE` (6) and close the transport.
+
+---
+
+## 4. Handshake and Idle Policies
+
+### Handshake Timeout
+1. Immediately upon establishing a transport connection, the server **MUST** arm a handshake timer.
+2. If authentication does not complete successfully before the timer expires, the server **MUST** send an `ERROR` frame with code `HANDSHAKE_TIMEOUT` (8) and close the transport.
+
+> **Reference implementation default:** `10,000` ms (10 seconds).
+
+### Idle Liveness & Heartbeats
+* `PING` and `PONG` packets may be transmitted at any time by either peer while in the `ACTIVE` state.
+* Servers **SHOULD** count any valid inbound frame (`DATA`, `BATCH`, `ACK`, `PING`) as peer activity.
+* Server architectures **SHOULD** use a swept idle scheduler rather than allocating a separate timer per connection.
+
+---
+
+## 5. Duplicate Identity & Concurrency
+
+Each authenticated `deviceId` **MUST** correspond to at most one active connection on the application server.
+
+```
+Existing Connection (Device "sensor-01") <─ Active
+                                             │
+New Connection arrives ("sensor-01") ────────┘
+    │
+    ▼
+1. Authenticate new HELLO
+2. If accepted: Terminate prior connection socket
+3. Bind new connection to "sensor-01"
+4. Send WELCOME to new connection
+```
+
+When a device reconnects after an ungraceful drop (such as a power cycle), the server **MUST** terminate the prior connection before binding the new connection.

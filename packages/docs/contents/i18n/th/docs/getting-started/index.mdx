@@ -1,0 +1,191 @@
+---
+title: "เริ่มต้นใช้งานและการเชื่อมต่อ"
+description: "วิธีติดตั้ง ตั้งค่า และรัน RLP Server และ Client ด้วย TypeScript และ Node.js"
+keywords: ["RLP", "เริ่มต้นใช้งาน", "การติดตั้ง", "node", "typescript", "server", "client"]
+---
+
+# เริ่มต้นใช้งาน RLP
+
+คู่มือนี้จะแสดงวิธีการติดตั้งไลบรารี `@raina-iot/rlp` การเปิด RLP Server บน Node.js การเชื่อมต่ออุปกรณ์ Client และการรับส่งข้อมูล Telemetry พร้อมการสั่งงาน Command แบบสองทิศทาง
+
+---
+
+## สิ่งที่ต้องเตรียม
+
+- **Node.js**: เวอร์ชัน 20.x ขึ้นไป (ตัว Runtime จำเป็นต้องใช้ฟังก์ชัน Buffer และ BigInt สมัยใหม่)
+- **Package Manager**: เลือกระหว่าง `pnpm`, `npm` หรือ `yarn`
+
+---
+
+## 1. การติดตั้งไลบรารี
+
+ติดตั้งแพ็กเกจ `@raina-iot/rlp` ลงในโปรเจกต์ของคุณ:
+
+```bash
+# กรณีใช้ pnpm
+pnpm add @raina-iot/rlp
+
+# กรณีใช้ npm
+npm install @raina-iot/rlp
+```
+
+---
+
+## 2. การสร้าง RLP Server
+
+สร้างไฟล์ `server.ts` และเริ่มต้นอินสแตนซ์ของ RLP Server โดยเซิร์ฟเวอร์จะเปิดรับ TCP หรือ TLS connection ตรวจสอบแพ็กเก็ต `HELLO` และกระจายเหตุการณ์ (Events) ให้แอปพลิเคชัน:
+
+```ts
+import { createRlpServer, ValueType } from '@raina-iot/rlp';
+
+// 1. ตั้งค่าเซิร์ฟเวอร์พร้อมฟังก์ชันตรวจสอบสิทธิ์
+const server = createRlpServer({
+  port: 9000,
+  host: '0.0.0.0',
+  handshakeTimeoutMs: 10_000,
+  authenticate: async (hello) => {
+    console.log(`[Handshake] อุปกรณ์ "${hello.deviceId}" กำลังขอเชื่อมต่อ...`);
+
+    // ตรวจสอบ Token หรือรหัสยืนยันตัวตน
+    const isValid = hello.credential.toString('utf8') === 'secret-device-token';
+
+    return {
+      accept: isValid,
+      // ส่ง Capabilities กลับไปให้ client ใน WELCOME packet (ไม่บังคับ)
+      capabilities: Buffer.from([0x01, 0x00]),
+      // แนบ Context เก็บไว้กับ Connection (ไม่บังคับ)
+      context: { authenticatedAt: Date.now() },
+    };
+  },
+});
+
+// 2. ดักรับข้อมูล Telemetry จากอุปกรณ์
+server.on('data', ({ deviceId, sample }) => {
+  console.log(`[Telemetry] อุปกรณ์: ${deviceId} | ช่อง: ${sample.channel} | ชนิด: ${sample.valueType} | ค่า:`, sample.value);
+
+  // กรณีอุปกรณ์ส่ง Timestamp มาด้วย:
+  if (sample.timestamp !== undefined) {
+    console.log(`  └ เวลาที่บันทึก: ${new Date(Number(sample.timestamp)).toISOString()}`);
+  }
+});
+
+// 3. ดักรับข้อมูล Telemetry แบบ Batch
+server.on('batch', ({ deviceId, samples }) => {
+  console.log(`[Batch] ได้รับข้อมูล ${samples.length} รายการจาก "${deviceId}"`);
+});
+
+// 4. ดักรับผลยืนยันการรันคำสั่ง (ACK)
+server.on('ack', ({ deviceId, ack }) => {
+  console.log(`[ACK] อุปกรณ์: ${deviceId} | รหัสคำสั่ง: ${ack.id} | สถานะ: ${ack.status}`);
+});
+
+// 5. เหตุการณ์การเชื่อมต่อ (Lifecycle)
+server.on('device:connect', (connection) => {
+  console.log(`[Online] อุปกรณ์เชื่อมต่อสำเร็จ: ${connection.deviceId}`);
+
+  // ตัวอย่าง: ส่งคำสั่งเปิดรีเลย์บน Channel 2 ไปยังอุปกรณ์
+  setTimeout(() => {
+    const sent = server.command(connection.deviceId!, {
+      channel: 2,
+      valueType: ValueType.BOOL,
+      value: true,
+    });
+    console.log(`[Command] ส่งคำสั่งไปยัง Channel 2 สำเร็จหรือไม่: ${sent}`);
+  }, 1000);
+});
+
+server.on('device:disconnect', (connection) => {
+  console.log(`[Offline] อุปกรณ์ตัดการเชื่อมต่อ: ${connection.deviceId}`);
+});
+
+// 6. สั่งเปิดพอร์ตรับการเชื่อมต่อ
+const addr = await server.listen();
+console.log(`RLP Server กำลังทำงานที่พอร์ต ${addr.port}`);
+```
+
+---
+
+## 3. การสร้าง Client เชื่อมต่อไปยังเซิร์ฟเวอร์
+
+สร้างไฟล์ `client.ts` เพื่อจำลองอุปกรณ์ IoT ที่ส่งข้อมูลขึ้นเซิร์ฟเวอร์:
+
+```ts
+import { connect } from 'node:net';
+import {
+  decodePacket,
+  encodeData,
+  encodeHello,
+  encodePacket,
+  FrameDecoder,
+  PacketType,
+  PROTOCOL_VERSION,
+  ValueType,
+  AckStatus,
+} from '@raina-iot/rlp';
+
+const socket = connect(9000, '127.0.0.1', () => {
+  console.log('เชื่อมต่อไปยัง RLP Server ผ่าน TCP สำเร็จ');
+
+  // 1. ส่งเฟรม HELLO เพื่อ Handshake ทันที
+  const helloFrame = encodeHello({
+    version: PROTOCOL_VERSION,
+    deviceId: 'sensor-device-01',
+    credential: Buffer.from('secret-device-token', 'utf8'),
+    capabilities: Buffer.alloc(0),
+  });
+  socket.write(helloFrame);
+});
+
+// 2. ตัวถอดรหัส FrameDecoder สำหรับรองรับ TCP Stream
+const decoder = new FrameDecoder();
+
+socket.on('data', (chunk) => {
+  for (const frame of decoder.push(chunk)) {
+    const packet = decodePacket(frame);
+
+    switch (packet.type) {
+      case PacketType.WELCOME:
+        console.log('[Server] ยืนยันสิทธิ์สำเร็จ! Protocol Version:', packet.welcome.version);
+
+        // เริ่มส่งค่าอุณหภูมิขึ้นเซิร์ฟเวอร์ทุก 5 วินาที ที่ช่องสัญญาณหมายเลข 1
+        setInterval(() => {
+          const telemetryFrame = encodeData({
+            channel: 1,
+            valueType: ValueType.FLOAT32,
+            value: 26.4,
+          });
+          socket.write(telemetryFrame);
+          console.log('[Client] ส่งค่า Telemetry 26.4 C บน Channel 1');
+        }, 5000);
+        break;
+
+      case PacketType.COMMAND:
+        console.log(`[Server] ได้รับคำสั่ง #${packet.command.id} บน Channel ${packet.command.channel}:`, packet.command.value);
+
+        // ส่งเฟรม ACK ยืนยันการทำงานกลับไปยังเซิร์ฟเวอร์
+        const ackFrame = encodePacket({
+          type: PacketType.ACK,
+          ack: {
+            id: packet.command.id,
+            status: AckStatus.OK,
+          },
+        });
+        socket.write(ackFrame);
+        console.log(`[Client] ตอบรับ ACK สำหรับคำสั่ง #${packet.command.id}`);
+        break;
+
+      case PacketType.ERROR:
+        console.error('[Error] เซิร์ฟเวอร์แจ้งข้อผิดพลาด:', packet.error.code, packet.error.message);
+        break;
+    }
+  }
+});
+```
+
+---
+
+## หัวข้อที่แนะนำให้อ่านต่อ
+
+- [โครงสร้างเฟรมและการจัดการ Stream](/th/docs/spec/framing): เจาะลึกโครงสร้าง Header 4 ไบต์ และการจัดคิว Backpressure
+- [ชนิดข้อมูล Value Types](/th/docs/spec/data-types): ศึกษาการ Encode ชนิดข้อมูลทั้ง 13 รูปแบบ
+- [ตัวอย่างเฟรมและ Hex Dumps](/th/docs/examples/wire-frames): ดูตัวอย่างไบต์จริงสำหรับใช้สร้างหรือทดสอบ Client บน Microcontroller

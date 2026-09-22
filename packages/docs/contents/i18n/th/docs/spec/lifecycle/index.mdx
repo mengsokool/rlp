@@ -1,0 +1,115 @@
+---
+title: "วงจรการเชื่อมต่อและ State Machine"
+description: "ข้อกำหนดสถานะของ Session ใน RLP v1, กฎการเปลี่ยนสถานะ, การจับเวลา Handshake และการจัดการ Concurrency"
+keywords: ["RLP", "lifecycle", "state machine", "handshake", "timeout", "authentication", "session"]
+---
+
+# วงจรการเชื่อมต่อและ State Machine
+
+เอกสารนี้ระบุรายละเอียดของวงจรการเชื่อมต่อ (Lifecycle) กฎการเปลี่ยนสถานะของ State Machine นโยบายการจับเวลา Handshake และการจัดการเมื่อมีอุปกรณ์เชื่อมต่อซ้ำใน RLP Version 1
+
+---
+
+## 1. ภาพรวมสถานะของ Session
+
+RLP Session จะดำเนินไปตาม 5 สถานะอย่างเป็นทางการ:
+
+```
+               [ เชื่อมต่อ TCP / TLS สำเร็จ ]
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │  WAITING_HELLO  │
+                 └────────┬────────┘
+                          │
+                    ได้รับ HELLO
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │  AUTHENTICATED  │
+                 └────────┬────────┘
+                          │
+                     ส่ง WELCOME
+                          │
+                          ▼
+                 ┌─────────────────┐
+      ┌─────────>│     ACTIVE      │<─────────┐
+      │          └────────┬────────┘          │
+  DATA / BATCH            │             PING / PONG
+  COMMAND / ACK           │
+                          │
+           ERROR / DISCONNECT / Socket หลุด
+                          │
+                          ▼
+                 ┌─────────────────┐
+                 │     CLOSED      │
+                 └─────────────────┘
+```
+
+---
+
+## 2. กฎการเปลี่ยนสถานะ (State Transition Rules)
+
+| สถานะปัจจุบัน | แพ็กเก็ตขาเข้าที่อนุญาต | สถานะถัดไป | พฤติกรรมเมื่อพบข้อผิดพลาด |
+|---|---|---|---|
+| **`WAITING_HELLO`** | `HELLO` เท่านั้น | เมื่อตรวจสอบสิทธิ์ผ่าน $\to$ `AUTHENTICATED` | แพ็กเก็ตอื่นใดนอกเหนือจาก `HELLO` **MUST** ส่งข้อผิดพลาด `INVALID_STATE` (6) |
+| **`AUTHENTICATED`** | สถานะภายในของ Server | Server ส่ง `WELCOME` $\to$ เปลี่ยนเป็น `ACTIVE` | N/A (สถานะชั่วคราว) |
+| **`ACTIVE`** | Client: `DATA`, `BATCH`, `ACK`, `PING`, `PONG`, `ERROR`, `DISCONNECT`<br/>Server: `COMMAND`, `PING`, `PONG`, `ERROR`, `DISCONNECT` | คงสถานะ `ACTIVE` ไว้ และจะเปลี่ยนเป็น `CLOSED` เมื่อพบ `ERROR`, `DISCONNECT` หรือ Socket หลุด | หากได้รับ `HELLO` ในสถานะนี้ **MUST** ส่งข้อผิดพลาด `INVALID_STATE` ("duplicate HELLO")<br/>หาก Client ส่ง `WELCOME` หรือ `COMMAND` เข้ามา **MUST** ปฏิเสธด้วย `INVALID_STATE` ("packet direction invalid") |
+| **`CLOSED`** | ไม่อนุญาต | สถานะสิ้นสุด (Terminal State) | แพ็กเก็ตใด ๆ ที่ได้รับในสถานะนี้ **MUST** ส่งข้อผิดพลาด `INVALID_STATE` ("session is closed") |
+
+---
+
+## 3. การบังคับทิศทางของแพ็กเก็ต (Directional Enforcement)
+
+RLP ตรวจสอบทิศทางการส่งของแพ็กเก็ตอย่างเข้มงวดตามบทบาทของแต่ละฝั่ง:
+
+* **Client $\to$ Server เท่านั้น:**
+  * `HELLO` (1)
+  * `DATA` (3)
+  * `BATCH` (4)
+  * `ACK` (6)
+* **Server $\to$ Client เท่านั้น:**
+  * `WELCOME` (2)
+  * `COMMAND` (5)
+* **ส่งได้ทั้งสองทิศทาง (Bidirectional):**
+  * `PING` (7)
+  * `PONG` (8)
+  * `ERROR` (9)
+  * `DISCONNECT` (10)
+
+หากผู้รับพบแพ็กเก็ตที่มีทิศทางไม่ถูกต้อง (เช่น เซิร์ฟเวอร์ได้รับ `COMMAND` จากอุปกรณ์ หรืออุปกรณ์ได้รับ `DATA` จากเซิร์ฟเวอร์) ผู้รับ **MUST** ตัดการเชื่อมต่อทันทีด้วยรหัสข้อผิดพลาด `INVALID_STATE` (6)
+
+---
+
+## 4. นโยบาย Handshake และ Idle
+
+### การกำหนดเวลา Handshake Timeout
+1. ทันทีที่การเชื่อมต่อ TCP เปิดขึ้น เซิร์ฟเวอร์ **MUST** ตั้งเวลา Handshake Timer
+2. หากการยืนยันตัวตนไม่เสร็จสิ้นภายในเวลาที่กำหนด เซิร์ฟเวอร์ **MUST** ส่งเฟรม `ERROR` พร้อมรหัส `HANDSHAKE_TIMEOUT` (8) และสั่งปิดการเชื่อมต่อทันที
+
+> **ค่าเริ่มต้นของ Reference Implementation:** `10,000` มิลลิวินาที (10 วินาที)
+
+### การตรวจสอบการมีชีวิต (Liveness & Heartbeats)
+* แพ็กเก็ต `PING` และ `PONG` สามารถส่งได้ตลอดเวลาโดยทั้งสองฝั่งขณะอยู่ในสถานะ `ACTIVE`
+* เซิร์ฟเวอร์ **SHOULD** นับเฟรมข้อมูลที่ถูกต้องใด ๆ (`DATA`, `BATCH`, `ACK`, `PING`) ว่าเป็นการเคลื่อนไหวของอุปกรณ์
+* สถาปัตยกรรมเซิร์ฟเวอร์ **SHOULD** ใช้ระบบ Swept Idle Scheduler ส่วนกลาง แทนการสร้าง Timer แยกรายตัวต่อทุกการเชื่อมต่อ เพื่อประหยัด Memory
+
+---
+
+## 5. การจัดการเมื่ออุปกรณ์เชื่อมต่อซ้ำ (Duplicate Identity)
+
+ในระบบเซิร์ฟเวอร์ แต่ละ `deviceId` ที่ยืนยันสิทธิ์แล้ว **MUST** มีการเชื่อมต่อที่ Active ได้เพียง 1 Connection เท่านั้น
+
+```
+Connection เดิมของ "sensor-01" <─ กำลังทำงาน (Active)
+                                   │
+Connection ใหม่ของ "sensor-01" ────┘ (เพิ่งต่อเข้ามา)
+    │
+    ▼
+1. ตรวจสอบสิทธิ์ของ HELLO ใน Connection ใหม่
+2. หากผ่าน: สั่งปิด Socket ของ Connection เดิมทันที
+3. สลับการเชื่อมต่อไปยัง Connection ใหม่
+4. ส่ง WELCOME ให้กับ Connection ใหม่
+```
+
+เมื่ออุปกรณ์รีสตาร์ตหรือเน็ตหลุดกะทันหัน เซิร์ฟเวอร์ **MUST** ทำการปิด Connection เก่าที่ค้างอยู่ทิ้ง ก่อนที่จะผูกการทำงานเข้ากับ Connection ใหม่ของอุปกรณ์เดิมเสมอ
